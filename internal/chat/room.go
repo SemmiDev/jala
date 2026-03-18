@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 
 	logging "github.com/ipfs/go-log/v2"
 	pubsub "github.com/libp2p/go-libp2p-pubsub"
@@ -35,8 +36,13 @@ type Room struct {
 	selfID   peer.ID
 	nick     string
 
-	msgs     chan Message
-	once     sync.Once
+	msgs chan Message
+	once sync.Once
+
+	// peerNicks maps PeerID string to nickname.
+	// We update this as we see messages from peers.
+	peerNicks map[string]string
+	nicksMu   sync.RWMutex
 }
 
 // Join creates a GossipSub router, joins the topic for roomName, and
@@ -76,23 +82,41 @@ func Join(
 
 	msgs := make(chan Message, 64)
 	r := &Room{
-		Messages: msgs,
-		host:     h,
-		ps:       ps,
-		topic:    topic,
-		sub:      sub,
-		roomName: roomName,
-		selfID:   h.ID(),
-		nick:     nick,
-		msgs:     msgs,
+		Messages:  msgs,
+		host:      h,
+		ps:        ps,
+		topic:     topic,
+		sub:       sub,
+		roomName:  roomName,
+		selfID:    h.ID(),
+		nick:      nick,
+		msgs:      msgs,
+		peerNicks: make(map[string]string),
 	}
 
 	go r.readLoop(ctx)
 
-	// Announce arrival to the room
-	if err := r.Publish(NewJoin(h.ID().String(), nick)); err != nil {
-		log.Warnf("could not publish join announcement: %v", err)
-	}
+	// Announce arrival to the room and periodically rebroadcast identity.
+	// This helps peers who join late to learn our nickname without us
+	// having to send a chat message.
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+
+		// Initial announcement
+		if err := r.Publish(NewJoin(h.ID().String(), nick)); err != nil {
+			log.Warnf("could not publish join announcement: %v", err)
+		}
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				_ = r.Publish(NewJoin(h.ID().String(), nick))
+			}
+		}
+	}()
 
 	log.Infof("joined room %q as %q", roomName, nick)
 	return r, nil
@@ -121,12 +145,21 @@ func (r *Room) PeerNicks() []string {
 	peers := r.topic.ListPeers()
 	out := make([]string, 0, len(peers)+1)
 	out = append(out, r.nick+" (you)")
+
+	r.nicksMu.RLock()
+	defer r.nicksMu.RUnlock()
+
 	for _, p := range peers {
-		short := p.String()
-		if len(short) > 12 {
-			short = short[:12] + "…"
+		id := p.String()
+		if nick, ok := r.peerNicks[id]; ok {
+			out = append(out, nick)
+		} else {
+			short := id
+			if len(short) > 12 {
+				short = short[:12] + "…"
+			}
+			out = append(out, short)
 		}
-		out = append(out, short)
 	}
 	return out
 }
@@ -171,6 +204,23 @@ func (r *Room) readLoop(ctx context.Context) {
 		msg, err := Decode(rawMsg.Data)
 		if err != nil {
 			log.Debugf("malformed message from %s: %v", rawMsg.ReceivedFrom, err)
+			continue
+		}
+
+		// Update nickname map
+		r.nicksMu.Lock()
+		oldNick, exists := r.peerNicks[msg.SenderID]
+		isNew := !exists || (msg.Type == MsgJoin && oldNick != msg.Nick)
+		if msg.Type == MsgLeave {
+			delete(r.peerNicks, msg.SenderID)
+		} else {
+			r.peerNicks[msg.SenderID] = msg.Nick
+		}
+		r.nicksMu.Unlock()
+
+		// For MsgJoin, only push to UI if it's actually new/changed to avoid
+		// UI spam from periodic rebroadcasts.
+		if msg.Type == MsgJoin && !isNew {
 			continue
 		}
 

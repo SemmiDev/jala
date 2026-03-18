@@ -50,7 +50,7 @@ func DefaultConfig(priv crypto.PrivKey) Config {
 			"/ip4/0.0.0.0/udp/0/quic-v1",
 			"/ip6/::/tcp/0",
 		},
-		RendezvousNS:   "/jala/rendezvous/v1",
+		RendezvousNS:   "jala-rendezvous-v1",
 		EnableMDNS:     true,
 		EnableDHT:      true,
 		BootstrapPeers: ipfsBootstrapPeers(),

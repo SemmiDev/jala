@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
@@ -81,6 +82,7 @@ func (m *Model) Init() tea.Cmd {
 		textinput.Blink,
 		m.listenForMessages(),
 		m.refreshPeerList(),
+		m.tick(),
 	)
 }
 
@@ -106,6 +108,15 @@ func (m *Model) refreshPeerList() tea.Cmd {
 	return func() tea.Msg {
 		return peerListMsg(m.room.PeerNicks())
 	}
+}
+
+// tickMsg is sent periodically to refresh background state.
+type tickMsg struct{}
+
+func (m *Model) tick() tea.Cmd {
+	return tea.Tick(time.Second*5, func(t time.Time) tea.Msg {
+		return tickMsg{}
+	})
 }
 
 // ── Update ────────────────────────────────────────────────────────────────────
@@ -137,6 +148,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case tea.KeyTab:
 			m.showPeers = !m.showPeers
+			if m.showPeers {
+				cmds = append(cmds, m.refreshPeerList())
+			}
 
 		case tea.KeyCtrlL:
 			// Clear chat history
@@ -162,6 +176,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// ── Peer list update ──────────────────────────────────────────────────
 	case peerListMsg:
 		m.peers = []string(msg)
+
+	case tickMsg:
+		cmds = append(cmds, m.refreshPeerList(), m.tick())
 
 	// ── Error ─────────────────────────────────────────────────────────────
 	case errMsg:

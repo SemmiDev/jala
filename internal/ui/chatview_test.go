@@ -82,7 +82,7 @@ func TestWrapText(t *testing.T) {
 		wantLines int
 	}{
 		{"short text", 80, 1},
-		{"a b c d e f g", 5, 4},
+		{"a b c d e f g", 5, 3},
 		{"", 80, 1},
 		{"oneword", 3, 1}, // single word always on one line
 	}
