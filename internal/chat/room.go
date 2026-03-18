@@ -45,8 +45,12 @@ type Room struct {
 	nicksMu   sync.RWMutex
 }
 
-// Join creates a GossipSub router, joins the topic for roomName, and
+// Join joins the topic for roomName on the given GossipSub router and
 // returns a Room ready to send and receive messages.
+//
+// ps must be a *pubsub.PubSub created once per host (see NewGossipSub).
+// Sharing one router avoids silent protocol conflicts that arise when
+// multiple GossipSub instances are started on the same libp2p host.
 //
 // A join announcement is published immediately so other peers know we
 // arrived. ctx is used only for the lifetime of this call; use Close
@@ -54,20 +58,10 @@ type Room struct {
 func Join(
 	ctx context.Context,
 	h host.Host,
+	ps *pubsub.PubSub,
 	roomName string,
 	nick string,
 ) (*Room, error) {
-	// GossipSub router — one per host is fine; here we create a new one
-	// per room for simplicity. In a multi-room app you'd share one router.
-	ps, err := pubsub.NewGossipSub(ctx, h,
-		pubsub.WithMessageSigning(true),
-		pubsub.WithStrictSignatureVerification(true),
-		pubsub.WithFloodPublish(true),
-	)
-	if err != nil {
-		return nil, fmt.Errorf("room: gossipsub: %w", err)
-	}
-
 	topicName := topicForRoom(roomName)
 	topic, err := ps.Join(topicName)
 	if err != nil {
@@ -200,8 +194,11 @@ func (r *Room) readLoop(ctx context.Context) {
 			return
 		}
 
-		// GossipSub echoes our own publishes back; skip them.
-		if rawMsg.ReceivedFrom == r.selfID {
+		// Skip messages we originally sent.
+		// Use GetFrom() (the signing PeerID) not ReceivedFrom (the
+		// forwarding relay) — otherwise echoes relayed through another
+		// peer slip through and appear as duplicates.
+		if rawMsg.GetFrom() == r.selfID {
 			continue
 		}
 

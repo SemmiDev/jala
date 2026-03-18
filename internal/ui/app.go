@@ -25,6 +25,14 @@ type errMsg struct{ err error }
 
 func (e errMsg) Error() string { return e.err.Error() }
 
+// roomClosedMsg is sent when the room's message channel is closed
+// (the node shut down). Handled in Update to cleanly quit the TUI.
+type roomClosedMsg struct{}
+
+// clearStatusMsg is sent after a short delay to dismiss transient
+// error banners from the status bar.
+type clearStatusMsg struct{}
+
 // ── Model ─────────────────────────────────────────────────────────────────────
 
 // Model is the Bubble Tea root model. It owns all UI state.
@@ -96,8 +104,11 @@ func (m *Model) listenForMessages() tea.Cmd {
 	return func() tea.Msg {
 		msg, ok := <-m.room.Messages
 		if !ok {
-			// Channel closed — room was shut down
-			return tea.Quit()
+			// Channel closed — the room was shut down externally.
+			// Return a typed Msg so Update can dispatch tea.Quit.
+			// (tea.Quit() itself is a Cmd, not a Msg — returning it
+			// directly here would be silently ignored by Bubble Tea.)
+			return roomClosedMsg{}
 		}
 		return incomingMsg(msg)
 	}
@@ -163,6 +174,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, inputCmd)
 		}
 
+	// ── Room closed (network shutdown) ───────────────────────────────────
+	case roomClosedMsg:
+		return m, tea.Quit
+
 	// ── Incoming network message ──────────────────────────────────────────
 	case incomingMsg:
 		m.chatView.Push(chat.Message(msg))
@@ -183,6 +198,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// ── Error ─────────────────────────────────────────────────────────────
 	case errMsg:
 		m.statusMsg = "⚠ " + msg.Error()
+		// Auto-clear the banner after 4 s so it doesn't permanently
+		// obscure the real status bar.
+		cmds = append(cmds, tea.Tick(4*time.Second, func(time.Time) tea.Msg {
+			return clearStatusMsg{}
+		}))
+
+	case clearStatusMsg:
+		m.statusMsg = ""
 	}
 
 	return m, tea.Batch(cmds...)

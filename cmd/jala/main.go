@@ -19,12 +19,13 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"math/rand"
+	"math/rand/v2"
 	"os"
 	"os/signal"
 	"syscall"
 
 	logging "github.com/ipfs/go-log/v2"
+	pubsub "github.com/libp2p/go-libp2p-pubsub"
 	"github.com/semmidev/jala/internal/chat"
 	"github.com/semmidev/jala/internal/node"
 	"github.com/semmidev/jala/internal/ui"
@@ -99,8 +100,21 @@ func main() {
 	}
 	defer n.Close()
 
+	// ── Create one shared GossipSub router per host ───────────────────────
+	// A libp2p host must only have one GossipSub instance. Creating a new
+	// router per room (the old behaviour) causes silent protocol conflicts
+	// and dropped messages between peers.
+	ps, err := pubsub.NewGossipSub(ctx, n.Host,
+		pubsub.WithMessageSigning(true),
+		pubsub.WithStrictSignatureVerification(true),
+		pubsub.WithFloodPublish(true),
+	)
+	if err != nil {
+		fatal("gossipsub: %v", err)
+	}
+
 	// ── Join the chat room ────────────────────────────────────────────────
-	r, err := chat.Join(ctx, n.Host, *room, displayNick)
+	r, err := chat.Join(ctx, n.Host, ps, *room, displayNick)
 	if err != nil {
 		fatal("join room: %v", err)
 	}
@@ -140,8 +154,8 @@ var (
 
 // randomNick returns a memorable adjective-animal nickname, e.g. "silentOtter".
 func randomNick() string {
-	adj := adjectives[rand.Intn(len(adjectives))]
-	animal := animals[rand.Intn(len(animals))]
+	adj := adjectives[rand.IntN(len(adjectives))]
+	animal := animals[rand.IntN(len(animals))]
 	// capitalise the animal part for camelCase readability
 	return adj + string(animal[0]-32) + animal[1:]
 }

@@ -218,7 +218,11 @@ func (n *Node) advertiseAndDiscover(ctx context.Context) {
 					continue
 				}
 				go func(p peer.AddrInfo) {
-					if err := n.Host.Connect(ctx, p); err != nil {
+					// Use an independent context with timeout so a
+					// cancelled outer ctx doesn't kill in-flight connects.
+					cctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+					defer cancel()
+					if err := n.Host.Connect(cctx, p); err != nil {
 						log.Debugf("connect %s: %v", p.ID, err)
 					}
 				}(pi)
