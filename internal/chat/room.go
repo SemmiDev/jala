@@ -15,16 +15,8 @@ import (
 var log = logging.Logger("jala/room")
 
 // Room represents a single GossipSub chat channel.
-//
-// Design notes:
-//   - One Room = one GossipSub topic. Topic name doubles as the room name.
-//   - All incoming messages are pushed onto the Messages channel so the
-//     UI can consume them without knowing anything about libp2p.
-//   - The room is safe to use from multiple goroutines.
 type Room struct {
 	// Messages is the inbound stream of decoded messages.
-	// The UI reads from this channel; the room's read-loop writes to it.
-	// Closed when the room is closed.
 	Messages <-chan Message
 
 	host   host.Host
@@ -40,21 +32,12 @@ type Room struct {
 	once sync.Once
 
 	// peerNicks maps PeerID string to nickname.
-	// We update this as we see messages from peers.
 	peerNicks map[string]string
 	nicksMu   sync.RWMutex
 }
 
 // Join joins the topic for roomName on the given GossipSub router and
 // returns a Room ready to send and receive messages.
-//
-// ps must be a *pubsub.PubSub created once per host (see NewGossipSub).
-// Sharing one router avoids silent protocol conflicts that arise when
-// multiple GossipSub instances are started on the same libp2p host.
-//
-// A join announcement is published immediately so other peers know we
-// arrived. ctx is used only for the lifetime of this call; use Close
-// to stop the room later.
 func Join(
 	ctx context.Context,
 	h host.Host,
@@ -91,9 +74,15 @@ func Join(
 	go r.readLoop(ctx)
 
 	// Announce arrival to the room and periodically rebroadcast identity.
-	// This helps peers who join late to learn our nickname without us
-	// having to send a chat message.
 	go func() {
+		// Wait a small bit for GossipSub to find peers before announcing.
+		// If we announce TOO fast, nobody is listening yet.
+		select {
+		case <-time.After(1 * time.Second):
+		case <-ctx.Done():
+			return
+		}
+
 		ticker := time.NewTicker(30 * time.Second)
 		defer ticker.Stop()
 
@@ -172,10 +161,8 @@ func (r *Room) Nick() string { return r.nick }
 func (r *Room) SelfID() string { return r.selfID.String() }
 
 // Close sends a leave announcement and unsubscribes from the topic.
-// Safe to call multiple times.
 func (r *Room) Close() {
 	r.once.Do(func() {
-		// Best-effort leave notice
 		_ = r.Publish(NewLeave(r.selfID.String(), r.nick))
 		r.sub.Cancel()
 		_ = r.topic.Close()
@@ -184,27 +171,21 @@ func (r *Room) Close() {
 	})
 }
 
-// readLoop drains the GossipSub subscription and pushes decoded messages
-// onto r.msgs. It stops when ctx is cancelled or the subscription closes.
+// readLoop drains the GossipSub subscription and pushes decoded messages.
 func (r *Room) readLoop(ctx context.Context) {
 	for {
 		rawMsg, err := r.sub.Next(ctx)
 		if err != nil {
-			// ctx cancelled or sub closed — normal shutdown path
 			return
 		}
 
-		// Skip messages we originally sent.
-		// Use GetFrom() (the signing PeerID) not ReceivedFrom (the
-		// forwarding relay) — otherwise echoes relayed through another
-		// peer slip through and appear as duplicates.
 		if rawMsg.GetFrom() == r.selfID {
 			continue
 		}
 
 		msg, err := Decode(rawMsg.Data)
 		if err != nil {
-			log.Debugf("malformed message from %s: %v", rawMsg.ReceivedFrom, err)
+			log.Debugf("malformed message from %s: %v", rawMsg.GetFrom(), err)
 			continue
 		}
 
@@ -212,15 +193,15 @@ func (r *Room) readLoop(ctx context.Context) {
 		r.nicksMu.Lock()
 		oldNick, exists := r.peerNicks[msg.SenderID]
 		isNew := !exists || (msg.Type == MsgJoin && oldNick != msg.Nick)
+		
 		if msg.Type == MsgLeave {
 			delete(r.peerNicks, msg.SenderID)
-		} else {
+		} else if msg.Nick != "" {
 			r.peerNicks[msg.SenderID] = msg.Nick
 		}
 		r.nicksMu.Unlock()
 
-		// For MsgJoin, only push to UI if it's actually new/changed to avoid
-		// UI spam from periodic rebroadcasts.
+		// For MsgJoin, only push to UI if it's actually new/changed.
 		if msg.Type == MsgJoin && !isNew {
 			continue
 		}
@@ -230,14 +211,11 @@ func (r *Room) readLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		default:
-			// Drop if the UI is not consuming fast enough; never block network.
 			log.Warn("message buffer full — dropping message")
 		}
 	}
 }
 
-// topicForRoom returns the GossipSub topic string for a room name.
-// Namespacing prevents collisions with other libp2p applications.
 func topicForRoom(name string) string {
 	return "/jala/room/v1/" + name
 }
