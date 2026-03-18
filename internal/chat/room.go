@@ -139,29 +139,33 @@ func (r *Room) Send(text string) error {
 	return r.Publish(NewChat(r.selfID.String(), r.nick, text))
 }
 
-// PeerNicks returns a map of PeerID → short ID for all peers currently
+// PeerNicks returns a list of 'nick (shortID)' for all peers currently
 // subscribed to the room's topic (including ourselves).
 func (r *Room) PeerNicks() []string {
 	peers := r.topic.ListPeers()
 	out := make([]string, 0, len(peers)+1)
-	out = append(out, r.nick+" (you)")
+	out = append(out, fmt.Sprintf("%s (%s) (you)", r.nick, truncateID(r.selfID.String())))
 
 	r.nicksMu.RLock()
 	defer r.nicksMu.RUnlock()
 
 	for _, p := range peers {
 		id := p.String()
+		shortID := truncateID(id)
 		if nick, ok := r.peerNicks[id]; ok {
-			out = append(out, nick)
+			out = append(out, fmt.Sprintf("%s (%s)", nick, shortID))
 		} else {
-			short := id
-			if len(short) > 12 {
-				short = short[:12] + "…"
-			}
-			out = append(out, short)
+			out = append(out, fmt.Sprintf("(%s)", shortID))
 		}
 	}
 	return out
+}
+
+func truncateID(id string) string {
+	if len(id) > 12 {
+		return id[:12] + "…"
+	}
+	return id
 }
 
 // RoomName returns the human-visible room name.
